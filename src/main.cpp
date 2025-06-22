@@ -1,100 +1,113 @@
-#include <SPI.h>
 #include <Arduino.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 
-// Pin assignments
-const uint8_t PIN_D1 = D1;      // Touch/button 1: toggle/reset state
-const uint8_t PIN_D2 = D2;      // Touch/button 2: only in WORKING state
+// ——— Button pins ———
+#define RESET_PIN D1    // toggle/reset
+#define WORK_PIN  D2    // only active in WORKING
 
-// Debounce settings
-const unsigned long DEBOUNCE_DELAY = 50; // ms
+// ——— TFT pins ———
+#define TFT_CS   D8
+#define TFT_DC   D3
+#define TFT_RST  D4     // you can also tie to RST pin on board
 
-// State machine
-enum State {
-  HOME,
-  WORKING
-};
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
-State currentState = HOME;
+// debounce
+const unsigned long DEBOUNCE_DELAY = 50;
+unsigned long lastTimeReset = 0, lastTimeWork = 0;
+bool lastRawReset   = HIGH, debouncedReset = HIGH;
+bool lastRawWork    = HIGH, debouncedWork  = HIGH;
+
+// state machine
+enum State { HOME, WORKING };
+State state = HOME;
 uint8_t progressCount = 0;
 
-// For debouncing
-unsigned long lastDebounceTimeD1 = 0;
-unsigned long lastDebounceTimeD2 = 0;
-bool lastButtonStateD1 = HIGH;
-bool lastButtonStateD2 = HIGH;
+// ——— Helpers ———
+bool pressedDebounced(uint8_t pin, bool &lastRaw, bool &debounced, unsigned long &lastTime) {
+  bool reading = digitalRead(pin);
+  unsigned long now = millis();
+  if (reading != lastRaw) {
+    lastTime = now;
+  }
+  if (now - lastTime > DEBOUNCE_DELAY && reading != debounced) {
+    debounced = reading;
+    if (debounced == LOW) {
+      lastRaw = reading;
+      return true;
+    }
+  }
+  lastRaw = reading;
+  return false;
+}
+
+void drawHomeScreen() {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(3);
+  tft.setCursor(60, 100);
+  tft.print("HOME");
+}
+
+void drawWorkingScreen(uint8_t prog = 0) {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(40, 20);
+  tft.print("WORKING");
+
+  // outline bar (full width = 280px, height = 20px)
+  tft.drawRect(20, 180, 280, 20, ILI9341_WHITE);
+
+  // fill proportionally (each step = 56px)
+  if (prog > 0) {
+    tft.fillRect(20, 180, 56 * min(prog, (uint8_t)5), 20, ILI9341_GREEN);
+  }
+}
 
 void setup() {
   Serial.begin(115200);
 
-  // Configure buttons as inputs with pullups
-  pinMode(PIN_D1, INPUT_PULLUP);
-  pinMode(PIN_D2, INPUT_PULLUP);
+  pinMode(RESET_PIN, INPUT_PULLUP);
+  pinMode(WORK_PIN,  INPUT_PULLUP);
 
-  // Initial state
-  Serial.println("Starting in HOME state");
+  tft.begin();
+  tft.setRotation(1);
+  drawHomeScreen();
 }
 
 void loop() {
-  // Read pins (LOW when pressed if wired to GND + INPUT_PULLUP)
-  bool readingD1 = digitalRead(PIN_D1);
-  bool readingD2 = digitalRead(PIN_D2);
-  unsigned long now = millis();
-
-  // --- Handle D1 press (toggle/reset) ---
-  if (readingD1 != lastButtonStateD1) {
-    lastDebounceTimeD1 = now;
-  }
-  if (now - lastDebounceTimeD1 > DEBOUNCE_DELAY) {
-    // If the button state has stabilized…
-    static bool stableStateD1 = HIGH;
-    if (readingD1 != stableStateD1) {
-      stableStateD1 = readingD1;
-      if (stableStateD1 == LOW) { // button went HIGH→LOW: pressed
-        if (currentState == HOME) {
-          currentState = WORKING;
-          progressCount = 0;
-          Serial.println("→ ENTERED WORKING state");
-        } else {
-          currentState = HOME;
-          progressCount = 0;
-          Serial.println("→ RESET TO HOME state");
-        }
-      }
+  // Handle RESET button
+  if (pressedDebounced(RESET_PIN, lastRawReset, debouncedReset, lastTimeReset)) {
+    // toggle state & reset progress
+    if (state == HOME) {
+      state = WORKING;
+      progressCount = 0;
+      drawWorkingScreen(0);
+      Serial.println("→ ENTERED WORKING");
+    } else {
+      state = HOME;
+      progressCount = 0;
+      drawHomeScreen();
+      Serial.println("→ RETURNED HOME");
     }
   }
-  lastButtonStateD1 = readingD1;
 
-  // --- Handle D2 press (only in WORKING) ---
-  if (currentState == WORKING) {
-    if (readingD2 != lastButtonStateD2) {
-      lastDebounceTimeD2 = now;
+  // Handle WORK button only in WORKING
+  if (state == WORKING && pressedDebounced(WORK_PIN, lastRawWork, debouncedWork, lastTimeWork)) {
+    progressCount++;
+    drawWorkingScreen(progressCount);
+    Serial.print("Progress: "); Serial.println(progressCount);
+    if (progressCount >= 5) {
+      // done!
+      state = HOME;
+      drawHomeScreen();
+      Serial.println("★ WORK COMPLETE ★");
+      progressCount = 0;
     }
-    if (now - lastDebounceTimeD2 > DEBOUNCE_DELAY) {
-      static bool stableStateD2 = HIGH;
-      if (readingD2 != stableStateD2) {
-        stableStateD2 = readingD2;
-        if (stableStateD2 == LOW) {
-          // Increment progress
-          progressCount++;
-          Serial.print("Working progress: ");
-          Serial.println(progressCount);
-          // Check for completion
-          if (progressCount >= 5) {
-            currentState = HOME;
-            progressCount = 0;
-            Serial.println("★ WORK COMPLETE — Returning to HOME ★");
-          }
-        }
-      }
-    }
-    lastButtonStateD2 = readingD2;
-  } else {
-    // If not in WORKING, keep lastButtonStateD2 in sync
-    lastButtonStateD2 = readingD2;
   }
-
-  // small delay to avoid busy‐looping
+  // tiny delay to reduce chatter
   delay(10);
 }
